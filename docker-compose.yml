@@ -1,0 +1,127 @@
+# Services (all share the `rag-app` image, differing only in the command they run):
+#
+#   rag-api     default          OpenAI-compatible HTTP facade      -> host :8010
+#   open-webui  default          chat frontend, pointed at rag-api  -> host :3002
+#   app         --profile cli    interactive CLI (use `run`, not `up`)
+#   rag-mcp     --profile mcp    MCP server (Streamable HTTP)       -> host :9000
+#
+# So `docker compose up -d --build` brings up the chat stack, and the two optional
+# extras stay out of the way until asked for:
+#   docker compose run --rm app          # interactive CLI
+#   docker compose --profile mcp up -d   # MCP server
+#
+# Chroma is embedded (no separate DB container). The app talks to Ollama on the
+# Windows host at localhost:11434 via host.docker.internal.
+# Pull the model on the host once: `ollama pull qwen2.5:3b`.
+
+x-app-env: &app-env
+  OLLAMA_URL: http://host.docker.internal:11434
+  # Must be pulled on the host. Override in .env to switch models.
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+  DENSE_MODEL: ${DENSE_MODEL:-jinaai/jina-embeddings-v2-base-de}
+  CHROMA_DIR: /data/chroma
+  FASTEMBED_CACHE_DIR: /data/fastembed_cache
+  CHUNK_SIZE: ${CHUNK_SIZE:-1500}
+  CHUNK_OVERLAP: ${CHUNK_OVERLAP:-300}
+  TOP_K: ${TOP_K:-6}
+  # Minimum relevance (0-1) for a chunk to be used and cited.
+  SCORE_THRESHOLD: ${SCORE_THRESHOLD:-0.4}
+  CAPTURE_REQUESTS: ${CAPTURE_REQUESTS:-false}
+
+x-app-volumes: &app-volumes
+  - rag_data:/data
+  - C:\Users\admin\Nooshin\AiKnowledge:/knowledge:ro
+  # Read-only view of Open WebUI's storage. Uploads land there as
+  # "<resource-id>_<filename>", so we can parse the ORIGINAL PDF with PyMuPDF and
+  # keep real page numbers, instead of using the flattened text it sends us.
+  - open_webui_data:/owui:ro
+
+services:
+  app:
+    build: .
+    image: rag-app
+    environment: *app-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *app-volumes
+    # Profiled so `up` does not start a stray CLI container that immediately exits.
+    # `docker compose run --rm app` still works — run enables the profile itself.
+    profiles: [cli]
+
+  # OpenAI-compatible facade. Retrieval always runs server-side here, so whatever
+  # is chatting with it cannot skip the RAG or reach the bare model.
+  rag-api:
+    build: .
+    image: rag-app
+    container_name: rag-api
+    command: ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *app-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *app-volumes
+    ports:
+      # 8010 on the host: :8000 is taken by the separate rag-pipeline stack.
+      - "${RAG_API_PORT:-8010}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: rag-open-webui
+    depends_on:
+      rag-api:
+        condition: service_healthy
+    environment:
+      # Point Open WebUI at the RAG instead of at a real model.
+      OPENAI_API_BASE_URL: http://rag-api:8000/v1
+      OPENAI_API_KEY: local-dev-unused
+      # Keep users on the RAG: no direct Ollama access, no built-in RAG/web search
+      # duplicating the Chroma index.
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_WEB_SEARCH: "false"
+      ENABLE_RAG_WEB_SEARCH: "false"
+      # Attached files: hand us the FULL extracted text instead of Open WebUI's own
+      # retrieved snippets. src/api.py harvests it into Chroma, so an upload becomes
+      # part of the permanent corpus rather than a one-off chat attachment.
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      # Housekeeping calls would otherwise hit retrieval; src/api.py detects and
+      # bypasses them, but skipping them entirely is cheaper on small hardware.
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      # Local single-user setup — drop this to get the normal login/signup flow.
+      WEBUI_AUTH: "false"
+    volumes:
+      - open_webui_data:/app/backend/data
+    ports:
+      # 3002 on the host: :3000 already runs another Open WebUI instance. If you
+      # would rather reuse that one, skip this service — see README.
+      - "${OPEN_WEBUI_PORT:-3002}:8080"
+    restart: unless-stopped
+
+  # Agentic access path: the model chooses when to call these tools. Useful for
+  # Claude Code / Claude Desktop; for Open WebUI chat prefer rag-api above.
+  rag-mcp:
+    build: .
+    image: rag-app
+    container_name: rag-mcp
+    command: ["python", "-m", "src.mcp_server"]
+    environment:
+      <<: *app-env
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "9000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *app-volumes
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+    profiles: [mcp]
+
+volumes:
+  rag_data:
+  open_webui_data:

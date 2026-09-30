@@ -1,0 +1,16 @@
+langchain>=0.3
+langchain-community>=0.3
+langchain-chroma>=0.2
+langchain-text-splitters>=0.3
+langchain-ollama>=0.2
+chromadb>=0.5
+pymupdf>=1.24
+fastembed>=0.4
+python-dotenv>=1.0
+
+# HTTP facade for Open WebUI (src/api.py)
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# MCP tool server (src/mcp_server.py)
+mcp>=1.9
