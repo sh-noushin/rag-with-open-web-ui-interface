@@ -36,6 +36,8 @@ MODEL_ID = os.getenv("RAG_MODEL_ID", "local-rag")
 # Diagnostic: dump each incoming request body to disk. Used to discover exactly what
 # Open WebUI forwards when a user attaches a file. Off unless CAPTURE_REQUESTS=true.
 CAPTURE_REQUESTS = os.getenv("CAPTURE_REQUESTS", "false").lower() == "true"
+# A public demo must not let visitors add files to the shared index.
+ALLOW_UPLOADS = os.getenv("ALLOW_UPLOADS", "true").lower() == "true"
 CAPTURE_PATH = os.getenv("CAPTURE_PATH", "/data/owui_requests.jsonl")
 
 app = FastAPI(
@@ -270,8 +272,11 @@ def status() -> dict[str, Any]:
     """Richer smoke test: config plus what is currently indexed."""
     return {
         "status": "ok",
-        "model": ask.OLLAMA_MODEL,
-        "ollama_url": ask.OLLAMA_URL,
+        "llm_provider": ask.LLM_PROVIDER,
+        "model": ask.MODEL_NAME,
+        # Only meaningful (and only safe to expose) for the local setup.
+        **({"ollama_url": ask.OLLAMA_URL} if ask.LLM_PROVIDER == "ollama" else {}),
+        "uploads_enabled": ALLOW_UPLOADS,
         "top_k": ask.TOP_K,
         "indexed_documents": ingest.list_documents(),
     }
@@ -303,6 +308,11 @@ def chat_completions(request: ChatCompletionRequest) -> Any:
     # A file attached in the Open WebUI composer arrives as extracted text. Index it,
     # then fall through and answer from our own retrieval like any other question.
     attachments, real_query = _parse_owui_context(question)
+    if attachments and not ALLOW_UPLOADS:
+        return _completion_body(
+            "Uploading files is disabled in this demo. "
+            "Ask a question about the documents that are already indexed."
+        )
     ingested = [a.name for a in attachments if _ingest_attachment(a)]
     if attachments:
         question = real_query

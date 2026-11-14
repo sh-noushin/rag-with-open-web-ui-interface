@@ -1,4 +1,5 @@
-# Retrieval + answering: cosine search in Chroma, then Ollama for the answer.
+# Retrieval + answering: cosine search in Chroma, then an LLM for the answer
+# (local Ollama by default, or any OpenAI-compatible API -- see LLM_PROVIDER).
 #
 # The functions here are deliberately split so that both the CLI and the HTTP
 # facade in src/api.py reuse the same retrieval and prompting logic:
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterator
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
@@ -28,6 +30,20 @@ TOP_K = int(os.getenv("TOP_K", "6"))
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.4"))
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+
+# "ollama" (default, fully local) or "openai" for any OpenAI-compatible endpoint.
+# The hosted demo uses the latter, because visitors cannot reach a local Ollama:
+#   Gemini: LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+#           LLM_MODEL=gemini-2.0-flash
+#   Groq:   LLM_BASE_URL=https://api.groq.com/openai/v1
+#           LLM_MODEL=llama-3.1-8b-instant
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+
+# The model name actually in use, for /status and the CLI banner.
+MODEL_NAME = LLM_MODEL if LLM_PROVIDER == "openai" else OLLAMA_MODEL
 
 SYSTEM_PROMPT = "You are a helpful assistant for document-based question answering."
 
@@ -55,7 +71,23 @@ class Answer:
 
 
 @lru_cache(maxsize=1)
-def _model() -> ChatOllama:
+def _model() -> BaseChatModel:
+    if LLM_PROVIDER == "openai":
+        if not (LLM_BASE_URL and LLM_API_KEY and LLM_MODEL):
+            raise RuntimeError(
+                "LLM_PROVIDER=openai needs LLM_BASE_URL, LLM_API_KEY and LLM_MODEL"
+            )
+        # Imported lazily so the local-only setup does not need the package loaded.
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY,
+            model=LLM_MODEL,
+            temperature=0.1,
+        )
+    if LLM_PROVIDER != "ollama":
+        raise RuntimeError(f"Unknown LLM_PROVIDER {LLM_PROVIDER!r} (use ollama or openai)")
     return ChatOllama(
         base_url=OLLAMA_URL,
         model=OLLAMA_MODEL,

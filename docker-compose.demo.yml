@@ -1,0 +1,90 @@
+# Public live demo (Linux server). Differs from docker-compose.yml in three ways:
+#
+#   1. The LLM is an OpenAI-compatible cloud API (Gemini / Groq free tier), because
+#      visitors cannot reach an Ollama running on a home PC.
+#   2. The corpus is ./demo-docs (public sample files), never a private folder,
+#      and visitors cannot add files (ALLOW_UPLOADS=false + Open WebUI permission).
+#   3. Nothing publishes a host port. Open WebUI joins the shared `edge` network and
+#      the reverse proxy (Caddy, in the portfolio repo's deploy/ folder) serves it
+#      over HTTPS.
+#
+# Usage on the server:
+#   cp .env.demo.example .env.demo      # then put your API key in it
+#   docker compose -f docker-compose.demo.yml --env-file .env.demo up -d --build
+#   # index the sample documents once (re-run after adding files to demo-docs/):
+#   docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm rag-api \
+#     python -c "import pathlib; from src import ingest; [ingest.ingest_file(str(p)) for p in sorted(pathlib.Path('/knowledge').iterdir()) if p.suffix.lower() in ('.pdf', '.txt', '.md')]"
+
+name: rag-demo
+
+x-app-env: &app-env
+  LLM_PROVIDER: openai
+  LLM_BASE_URL: ${LLM_BASE_URL:?set LLM_BASE_URL in .env.demo}
+  LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env.demo}
+  LLM_MODEL: ${LLM_MODEL:?set LLM_MODEL in .env.demo}
+  ALLOW_UPLOADS: "false"
+  DENSE_MODEL: ${DENSE_MODEL:-jinaai/jina-embeddings-v2-base-de}
+  CHROMA_DIR: /data/chroma
+  FASTEMBED_CACHE_DIR: /data/fastembed_cache
+  CHUNK_SIZE: ${CHUNK_SIZE:-1500}
+  CHUNK_OVERLAP: ${CHUNK_OVERLAP:-300}
+  TOP_K: ${TOP_K:-6}
+  SCORE_THRESHOLD: ${SCORE_THRESHOLD:-0.4}
+
+services:
+  rag-api:
+    build: .
+    image: rag-app
+    command: ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *app-env
+    volumes:
+      - rag_data:/data
+      - ./demo-docs:/knowledge:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: rag-open-webui
+    depends_on:
+      rag-api:
+        condition: service_healthy
+    environment:
+      WEBUI_NAME: "RAG Demo"
+      OPENAI_API_BASE_URL: http://rag-api:8000/v1
+      OPENAI_API_KEY: internal-unused
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_WEB_SEARCH: "false"
+      ENABLE_RAG_WEB_SEARCH: "false"
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      # Public: real accounts. The FIRST account created becomes admin, so sign up
+      # yourself right after the first start. Visitors then get the plain "user"
+      # role straight away (no approval queue) and cannot change any settings.
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: "true"
+      DEFAULT_USER_ROLE: user
+      USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"
+      # Env vars win over anything changed in the admin UI after a restart.
+      ENABLE_PERSISTENT_CONFIG: "false"
+    volumes:
+      - open_webui_data:/app/backend/data
+    networks:
+      - default
+      - edge
+    restart: unless-stopped
+
+networks:
+  # Created by the reverse-proxy stack (portfolio repo, deploy/docker-compose.yml).
+  edge:
+    external: true
+
+volumes:
+  rag_data:
+  open_webui_data:
